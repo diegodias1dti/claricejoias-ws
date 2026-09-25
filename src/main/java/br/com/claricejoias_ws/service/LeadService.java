@@ -123,11 +123,13 @@ public class LeadService {
 
         if (isLojaMatriz) {
             fila.setRevendedorId(null);
-            WhatsappInstance whatsappInstance = whatsAppService.findByRevendedorIsNull();
-            fila.setInstanciaWhatsapp(whatsappInstance.getInstanceName());
+            fila.setInstanciaWhatsapp(whatsAppService.resolverInstanciaGlobal());
         } else {
             Revendedor revendedor = revendedorRepository.findById(revendedorID).orElseThrow(() -> new RegraNegocioException(""));
-            fila.setInstanciaWhatsapp(revendedor.getWhatsappInstance().getInstanceName());
+            // Revendedora ainda sem WhatsApp conectado: cai no fallback global em vez de NPE.
+            fila.setInstanciaWhatsapp(revendedor.getWhatsappInstance() != null
+                    ? revendedor.getWhatsappInstance().getInstanceName()
+                    : whatsAppService.resolverInstanciaGlobal());
             fila.setRevendedorId(revendedor.getId());
         }
 

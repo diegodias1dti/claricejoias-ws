@@ -6,6 +6,7 @@ import br.com.claricejoias_ws.model.EstoqueRevendedor;
 import br.com.claricejoias_ws.service.EstoqueRevendedorService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -14,6 +15,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/estoque-revendedor")
+@Slf4j
 @Tag(name = "Estoque Revendedor", description = "Gerenciamento de maletas e distribuição de joias")
 public class EstoqueRevendedorController {
 
@@ -27,6 +29,7 @@ public class EstoqueRevendedorController {
             service.transferirParaMaleta(dto);
             return ResponseEntity.ok("Transferência realizada com sucesso.");
         } catch (Exception e) {
+            log.error("Erro ao transferir produtos para a maleta", e);
             return ResponseEntity.badRequest().body(e.getMessage());
         }
     }
@@ -41,6 +44,7 @@ public class EstoqueRevendedorController {
             service.devolverParaEstoqueCentral(dto);
             return ResponseEntity.ok("Devolução dos itens não vendidos realizada com sucesso.");
         } catch (Exception e) {
+            log.error("Erro ao devolver produtos para o estoque central", e);
             return ResponseEntity.badRequest().body(e.getMessage());
         }
     }

@@ -6,9 +6,11 @@ import br.com.claricejoias_ws.dto.PedidoRequestDTO;
 import br.com.claricejoias_ws.enums.OrigemPedido;
 import br.com.claricejoias_ws.enums.StatusParcela;
 import br.com.claricejoias_ws.enums.StatusPedido;
+import br.com.claricejoias_ws.exceptions.RegraNegocioException;
 import br.com.claricejoias_ws.model.*;
 import br.com.claricejoias_ws.repository.*;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.modelmapper.ModelMapper;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -21,10 +23,15 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Random;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class PedidoService {
@@ -35,13 +42,26 @@ public class PedidoService {
     private final RevendedorRepository revendedorRepository;
     private final EstoqueRevendedorRepository estoqueRevendedorRepository;
     private final ModelMapper modelMapper;
+    private final KeycloakUserService keycloakUserService;
+    private final WhatsAppService whatsAppService;
+    private final MercadoPagoService mercadoPagoService;
 
 
 
     @Transactional
     public Pedido registrarPedidoPDV(PedidoRequestDTO dto, String userId, boolean isAdmin, String loginOperador) {
+        // Permite lançar a venda com a data/hora de agora (padrão) ou, se informado,
+        // com uma data passada — ex: venda feita no balcão e cadastrada só depois.
+        LocalDate dataInformada = dto.getDataVenda();
+        if (dataInformada != null && dataInformada.isAfter(LocalDate.now())) {
+            throw new RuntimeException("A data da venda não pode ser no futuro.");
+        }
+        LocalDateTime dataVendaFinal = (dataInformada != null)
+                ? dataInformada.atTime(LocalTime.now())
+                : LocalDateTime.now();
+
         Pedido pedido = new Pedido();
-        pedido.setDataCriacao(LocalDateTime.now());
+        pedido.setDataCriacao(dataVendaFinal);
         pedido.setLoginOperador(loginOperador);
         pedido.setOrigem(OrigemPedido.PDV);
         pedido.setStatus(StatusPedido.PAGO);
@@ -109,7 +129,7 @@ public class PedidoService {
             );
 
             List<Parcela> listaParcelas = new ArrayList<>();
-            LocalDate dataAtual = LocalDate.now();
+            LocalDate dataBaseParcelas = dataVendaFinal.toLocalDate();
 
             for (int i = 1; i <= qtdParcelas; i++) {
                 Parcela parcela = new Parcela();
@@ -117,7 +137,7 @@ public class PedidoService {
                 parcela.setNumeroParcela(i);
                 parcela.setValor(i == qtdParcelas ? valorUltimaParcela : valorPorParcela);
                 parcela.setStatus(StatusParcela.PENDENTE);
-                parcela.setDataVencimento(dataAtual.plusMonths(i));
+                parcela.setDataVencimento(dataBaseParcelas.plusMonths(i));
                 listaParcelas.add(parcela);
             }
             pedido.setParcelasDetalhadas(listaParcelas);
@@ -202,54 +222,242 @@ public class PedidoService {
         return pedidoRepository.save(pedido);
     }
 
+    /**
+     * Checkout real do e-commerce. Recebe o carrinho ativo do visitante/cliente logado e:
+     * 1) opcionalmente cria a conta dele (mesmo padrão do cadastro via Lead);
+     * 2) baixa o estoque na hora (central se for a loja matriz, maleta se for de uma revendedora);
+     * 3) finaliza como "RETIRADA" (combinar com a revendedora, confirmado manualmente depois) ou
+     *    "ONLINE" (gera link de pagamento no Mercado Pago e devolve a URL pra redirecionar).
+     *
+     * A revendedora dona do pedido vem do PRÓPRIO CARRINHO (carrinhoAtual.getRevendedor()),
+     * nunca do usuarioId de quem está comprando — usar o ID do cliente pra buscar uma
+     * "revendedora" era o bug que fazia esse checkout falhar pra qualquer cliente real.
+     */
     @Transactional
-    public Pedido realizarCheckoutOnline(String visitorId, String loginOperador, CheckoutDTO dto) {
+    public Map<String, Object> realizarCheckoutOnline(String visitorId, String usuarioId, CheckoutDTO dto) {
 
-        // Identifica o revendedor dono do catálogo virtual
-        Revendedor revendedor = revendedorRepository.findById(loginOperador)
-                .orElseThrow(() -> new RuntimeException("Revendedor não cadastrado."));
-
-        Pedido carrinhoAtual = pedidoRepository.buscarCarrinhoAtivo(visitorId, loginOperador)
+        Pedido carrinhoAtual = pedidoRepository.buscarCarrinhoAtivo(visitorId, usuarioId)
                 .orElseThrow(() -> new RuntimeException("Nenhum carrinho ativo encontrado para checkout."));
 
         if (carrinhoAtual.getItens().isEmpty()) {
-            throw new RuntimeException("Não é possível finalizar um pedido com a maleta vazia.");
+            throw new RuntimeException("Não é possível finalizar um pedido com o carrinho vazio.");
         }
 
-        // BAIXA DE ESTOQUE DA MALETA
+        Revendedor revendedor = carrinhoAtual.getRevendedor();
+        boolean isLojaMatriz = (revendedor == null);
+        String whatsappLimpo = dto.getWhatsapp() != null ? dto.getWhatsapp().replaceAll("[^0-9]", "") : null;
+
+        // 1. Cria a conta do cliente se solicitado e ele ainda não estiver logado.
+        //    criarUsuarioCliente já cria também o Cliente local isolado para esta loja,
+        //    então buscamos esse registro em vez de correr o risco de duplicá-lo.
+        String finalUsuarioId = usuarioId;
+        String senhaGerada = null;
+        Cliente cliente;
+
+        if (dto.isCriarConta() && (usuarioId == null || usuarioId.isBlank())) {
+            if (whatsappLimpo == null || whatsappLimpo.length() < 10) {
+                throw new RuntimeException("WhatsApp inválido para criar a conta.");
+            }
+            senhaGerada = String.format("%06d", new Random().nextInt(999999));
+            String emailKeycloak = whatsappLimpo + "@claricejoias.com.br";
+            finalUsuarioId = keycloakUserService.criarUsuarioCliente(
+                    emailKeycloak, senhaGerada, dto.getNome(), whatsappLimpo,
+                    revendedor != null ? revendedor.getId() : null
+            );
+            cliente = clienteRepository.findByUsuarioId(finalUsuarioId)
+                    .orElseThrow(() -> new IllegalStateException("Falha ao localizar o cliente recém-criado."));
+        } else {
+            Optional<Cliente> clienteExistente = isLojaMatriz
+                    ? clienteRepository.findByWhatsappAndRevendedorIsNull(whatsappLimpo)
+                    : clienteRepository.findByWhatsappAndRevendedorId(whatsappLimpo, revendedor.getId());
+
+            final String usuarioIdFinal = finalUsuarioId;
+            cliente = clienteExistente.orElseGet(() -> {
+                Cliente novo = new Cliente();
+                novo.setNome(dto.getNome());
+                novo.setWhatsapp(whatsappLimpo);
+                novo.setEmail(dto.getEmail());
+                novo.setRevendedor(revendedor);
+                novo.setUsuarioId(usuarioIdFinal != null && !usuarioIdFinal.isBlank() ? usuarioIdFinal : UUID.randomUUID().toString());
+                return clienteRepository.save(novo);
+            });
+        }
+
+        // 2. Baixa o estoque agora — vale tanto pra "pagar agora" quanto pra "retirar na
+        //    loja", pra não vender a mesma peça duas vezes enquanto um pedido está pendente.
         for (ItemPedido item : carrinhoAtual.getItens()) {
-            EstoqueRevendedor estoqueMaleta = estoqueRevendedorRepository
-                    .findByProdutoIdAndRevendedorId(item.getProduto().getId(), revendedor.getId())
-                    .orElseThrow(() -> new RuntimeException("Produto indisponível na maleta do revendedor."));
-
-            estoqueMaleta.diminuirEstoque(item.getQuantidade());
+            if (isLojaMatriz) {
+                item.getProduto().diminuirEstoqueCentral(item.getQuantidade());
+            } else {
+                EstoqueRevendedor estoqueMaleta = estoqueRevendedorRepository
+                        .findByProdutoIdAndRevendedorId(item.getProduto().getId(), revendedor.getId())
+                        .orElseThrow(() -> new RuntimeException("A peça \"" + item.getProduto().getNome() + "\" não está mais disponível nesta loja."));
+                estoqueMaleta.diminuirEstoque(item.getQuantidade());
+            }
         }
-
-        // Busca ou cria o Cliente isolado para o revendedor
-        Cliente cliente = clienteRepository.findByWhatsappAndRevendedorId(dto.getWhatsapp(), revendedor.getId())
-                .orElseGet(() -> {
-                    Cliente novoCliente = new Cliente();
-                    novoCliente.setNome(dto.getNome());
-                    novoCliente.setWhatsapp(dto.getWhatsapp());
-                    novoCliente.setEmail(dto.getEmail());
-                    novoCliente.setRevendedor(revendedor); // Isolamento
-                    return clienteRepository.save(novoCliente);
-                });
 
         carrinhoAtual.setCliente(cliente);
+        carrinhoAtual.setUsuarioId(finalUsuarioId);
         carrinhoAtual.setDataAtualizacao(LocalDateTime.now());
-        carrinhoAtual.setRevendedor(revendedor);
+        carrinhoAtual.calcularTotal();
 
-        carrinhoAtual.setStatus(StatusPedido.PENDENTE_PAGAMENTO);
-        carrinhoAtual.setMetodoPagamento(dto.getMetodoPagamento());
-        carrinhoAtual.setParcelas(dto.getParcelas());
-        carrinhoAtual.setValorRecebido(dto.getValorRecebido());
-        carrinhoAtual.setValorEntrada(dto.getValorEntrada());
+        Map<String, Object> resultado = new HashMap<>();
 
-        return pedidoRepository.save(carrinhoAtual);
+        if ("RETIRADA".equalsIgnoreCase(dto.getTipoFinalizacao())) {
+            carrinhoAtual.setStatus(StatusPedido.AGUARDANDO_RETIRADA);
+            carrinhoAtual.setMetodoPagamento("retirada_loja");
+            Pedido salvo = pedidoRepository.save(carrinhoAtual);
+
+            if (senhaGerada != null) notificarNovaConta(cliente, senhaGerada, revendedor);
+
+            resultado.put("tipo", "RETIRADA");
+            resultado.put("pedido", salvo);
+        } else {
+            carrinhoAtual.setStatus(StatusPedido.PENDENTE_PAGAMENTO);
+            carrinhoAtual.setMetodoPagamento("mercadopago");
+            Pedido salvo = pedidoRepository.save(carrinhoAtual);
+
+            String redirectUrl = mercadoPagoService.criarPreferencia(salvo);
+            pedidoRepository.save(salvo); // persiste o mercadoPagoPreferenceId setado acima
+
+            if (senhaGerada != null) notificarNovaConta(cliente, senhaGerada, revendedor);
+
+            resultado.put("tipo", "ONLINE");
+            resultado.put("pedidoId", salvo.getId());
+            resultado.put("redirectUrl", redirectUrl);
+        }
+
+        return resultado;
     }
 
+    /**
+     * Chamado pelo webhook do Mercado Pago. Idempotente: se o pedido já foi processado
+     * (PAGO ou CANCELADO), não faz nada — o Mercado Pago pode reenviar a mesma notificação.
+     */
+    @Transactional
+    public void confirmarPagamentoOnline(String paymentId, String externalReference, String statusMercadoPago) {
+        if (externalReference == null || externalReference.isBlank()) {
+            log.warn("Webhook do Mercado Pago sem external_reference (paymentId={}), ignorando.", paymentId);
+            return;
+        }
 
+        Long pedidoId;
+        try {
+            pedidoId = Long.parseLong(externalReference);
+        } catch (NumberFormatException e) {
+            log.warn("external_reference inválido no webhook do Mercado Pago: {}", externalReference);
+            return;
+        }
+
+        Pedido pedido = pedidoRepository.findById(pedidoId).orElse(null);
+        if (pedido == null) {
+            log.warn("Webhook do Mercado Pago referencia um pedido inexistente: {}", pedidoId);
+            return;
+        }
+
+        if (pedido.getStatus() == StatusPedido.PAGO || pedido.getStatus() == StatusPedido.CANCELADO) {
+            log.info("Pedido {} já estava {} — webhook do Mercado Pago ignorado (idempotência).", pedidoId, pedido.getStatus());
+            return;
+        }
+
+        pedido.setMercadoPagoPaymentId(paymentId);
+
+        if ("approved".equalsIgnoreCase(statusMercadoPago)) {
+            pedido.setStatus(StatusPedido.PAGO);
+            pedido.setValorRecebido(pedido.getTotal());
+            pedido.setTroco(BigDecimal.ZERO);
+            pedido.setComissaoRevendedor(calcularComissao(pedido));
+        } else if ("rejected".equalsIgnoreCase(statusMercadoPago) || "cancelled".equalsIgnoreCase(statusMercadoPago)) {
+            devolverEstoque(pedido);
+            pedido.setStatus(StatusPedido.CANCELADO);
+        }
+        // outros status (pending, in_process...) apenas gravam o paymentId e aguardam o próximo webhook.
+
+        pedidoRepository.save(pedido);
+    }
+
+    /**
+     * A revendedora (ou admin) confirma que o cliente apareceu, pagou e retirou a peça.
+     */
+    @Transactional
+    public Pedido confirmarRetirada(Long pedidoId, String usuarioId, boolean isAdmin) {
+        Pedido pedido = pedidoRepository.findById(pedidoId)
+                .orElseThrow(() -> new RuntimeException("Pedido não encontrado."));
+
+        validarPosseDoPedido(pedido, usuarioId, isAdmin);
+
+        if (pedido.getStatus() != StatusPedido.AGUARDANDO_RETIRADA) {
+            throw new RuntimeException("Este pedido não está aguardando retirada (status atual: " + pedido.getStatus() + ").");
+        }
+
+        pedido.setStatus(StatusPedido.PAGO);
+        pedido.setValorRecebido(pedido.getTotal());
+        pedido.setTroco(BigDecimal.ZERO);
+        pedido.setComissaoRevendedor(calcularComissao(pedido));
+        pedido.setDataAtualizacao(LocalDateTime.now());
+
+        return pedidoRepository.save(pedido);
+    }
+
+    /**
+     * Cancela um pedido que ainda não foi pago (o cliente nunca apareceu pra retirada,
+     * ou o pagamento online nunca se confirmou) e devolve o estoque reservado.
+     */
+    @Transactional
+    public Pedido cancelarPedidoPendente(Long pedidoId, String usuarioId, boolean isAdmin) {
+        Pedido pedido = pedidoRepository.findById(pedidoId)
+                .orElseThrow(() -> new RuntimeException("Pedido não encontrado."));
+
+        validarPosseDoPedido(pedido, usuarioId, isAdmin);
+
+        if (pedido.getStatus() != StatusPedido.AGUARDANDO_RETIRADA && pedido.getStatus() != StatusPedido.PENDENTE_PAGAMENTO) {
+            throw new RuntimeException("Só é possível cancelar pedidos pendentes ou aguardando retirada (status atual: " + pedido.getStatus() + ").");
+        }
+
+        devolverEstoque(pedido);
+        pedido.setStatus(StatusPedido.CANCELADO);
+        pedido.setDataAtualizacao(LocalDateTime.now());
+
+        return pedidoRepository.save(pedido);
+    }
+
+    private void validarPosseDoPedido(Pedido pedido, String usuarioId, boolean isAdmin) {
+        if (isAdmin) return;
+        boolean pertenceAoRevendedor = pedido.getRevendedor() != null && pedido.getRevendedor().getId().equals(usuarioId);
+        if (!pertenceAoRevendedor) {
+            throw new RegraNegocioException("Você não tem permissão para gerenciar este pedido.");
+        }
+    }
+
+    private BigDecimal calcularComissao(Pedido pedido) {
+        Revendedor revendedor = pedido.getRevendedor();
+        if (revendedor == null || revendedor.getPercentualComissao() == null) {
+            return BigDecimal.ZERO;
+        }
+        BigDecimal taxa = revendedor.getPercentualComissao().divide(new BigDecimal("100"), 4, RoundingMode.HALF_UP);
+        return pedido.getTotal().multiply(taxa).setScale(2, RoundingMode.HALF_UP);
+    }
+
+    private void devolverEstoque(Pedido pedido) {
+        boolean isLojaMatriz = pedido.getRevendedor() == null;
+        for (ItemPedido item : pedido.getItens()) {
+            if (isLojaMatriz) {
+                item.getProduto().adicionarEstoque(item.getQuantidade());
+            } else {
+                estoqueRevendedorRepository.findByProdutoIdAndRevendedorId(item.getProduto().getId(), pedido.getRevendedor().getId())
+                        .ifPresent(estoque -> estoque.setQuantidade(estoque.getQuantidade() + item.getQuantidade()));
+            }
+        }
+    }
+
+    private void notificarNovaConta(Cliente cliente, String senhaGerada, Revendedor revendedor) {
+        String mensagem = String.format(
+                "Olá *%s*! 💎\n\nSeu cadastro foi realizado com sucesso na Clarice Joias!\n" +
+                        "Sua senha provisória de acesso é: *%s*\n\nSeu pedido já foi registrado com sucesso!",
+                cliente.getNome(), senhaGerada
+        );
+        whatsAppService.enfileirarMensagemSistema(cliente.getWhatsapp(), mensagem, revendedor);
+    }
 
     public Page<PedidoDTO> listarPedidos(String userId, boolean isAdmin, String loginOperador, String metodoPagamento, LocalDate dataInicio, LocalDate dataFim, Pageable pageable) {
 

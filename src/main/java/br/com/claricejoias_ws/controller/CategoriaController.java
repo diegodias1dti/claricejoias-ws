@@ -2,6 +2,7 @@ package br.com.claricejoias_ws.controller;
 
 import br.com.claricejoias_ws.service.CategoriaService;
 import br.com.claricejoias_ws.dto.CategoriaDTO;
+import br.com.claricejoias_ws.dto.SubcategoriaRequestDTO;
 import br.com.claricejoias_ws.model.Categoria;
 import br.com.claricejoias_ws.model.Subcategoria;
 import io.swagger.v3.oas.annotations.Operation;
@@ -10,6 +11,7 @@ import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -74,6 +76,22 @@ public class CategoriaController {
             @RequestBody Categoria categoria) {
         try {
             return ResponseEntity.ok(service.atualizar(id, categoria));
+        } catch (RuntimeException e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    @Operation(summary = "Criar subcategoria", description = "Cria uma nova subcategoria vinculada a uma categoria existente")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "201", description = "Subcategoria criada com sucesso"),
+            @ApiResponse(responseCode = "404", description = "Categoria pai não encontrada")
+    })
+    @PostMapping("/{id}/subcategorias")
+    public ResponseEntity<Subcategoria> criarSubcategoria(
+            @Parameter(description = "ID da categoria pai") @PathVariable Long id,
+            @RequestBody SubcategoriaRequestDTO dto) {
+        try {
+            return ResponseEntity.status(HttpStatus.CREATED).body(service.criarSubcategoria(id, dto.getNome()));
         } catch (RuntimeException e) {
             return ResponseEntity.notFound().build();
         }

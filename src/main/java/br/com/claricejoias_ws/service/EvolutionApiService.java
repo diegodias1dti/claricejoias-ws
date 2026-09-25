@@ -137,16 +137,35 @@ public class EvolutionApiService {
 
     public ResponseEntity<String> createInstanceForUser(String usuarioId, String username, boolean isAdmin) {
 
-        // 1. Validação Inicial: O usuário já possui instância?
-        if (whatsappInstanceRepository.existsByUsuarioId(usuarioId)) {
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body("{\"message\": \"Usuário já possui uma instância ativa.\"}");
+        // 1. O usuário já possui um vínculo local de instância? Antes de bloquear a criação,
+        // confirmamos que essa instância ainda existe DE VERDADE na Evolution API — senão um
+        // vínculo órfão (ex: a Evolution API reiniciou/perdeu estado) trava pra sempre a
+        // criação de uma instância nova, e ela nem aparece na lista pra você apagar (a lista
+        // também é montada consultando a Evolution API).
+        Optional<WhatsappInstance> minhaInstancia = whatsappInstanceRepository.findByUsuarioId(usuarioId);
+        if (minhaInstancia.isPresent()) {
+            if (instanciaAindaExisteNaEvolution(minhaInstancia.get().getInstanceName())) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                        .body("{\"message\": \"Usuário já possui uma instância ativa.\"}");
+            }
+            log.warn("Vínculo local da instância {} está órfão (não existe mais na Evolution API). Removendo antes de criar uma nova.",
+                    minhaInstancia.get().getInstanceName());
+            whatsappInstanceRepository.delete(minhaInstancia.get());
         }
 
-        // 2. Regra de Negócio: Garantir apenas UMA instância sem revendedor (Se for Admin)
-        if (isAdmin && whatsappInstanceRepository.existsByRevendedorIsNull()) {
-            return ResponseEntity.status(HttpStatus.CONFLICT)
-                    .body("{\"message\": \"Já existe uma instância global ativa no sistema.\"}");
+        // 2. Regra de Negócio: Garantir apenas UMA instância sem revendedor (Se for Admin) —
+        // mesma checagem de órfão antes de bloquear.
+        if (isAdmin) {
+            Optional<WhatsappInstance> instanciaGlobal = whatsappInstanceRepository.findByRevendedorIsNull();
+            if (instanciaGlobal.isPresent()) {
+                if (instanciaAindaExisteNaEvolution(instanciaGlobal.get().getInstanceName())) {
+                    return ResponseEntity.status(HttpStatus.CONFLICT)
+                            .body("{\"message\": \"Já existe uma instância global ativa no sistema.\"}");
+                }
+                log.warn("Vínculo local da instância global {} está órfão. Removendo antes de criar uma nova.",
+                        instanciaGlobal.get().getInstanceName());
+                whatsappInstanceRepository.delete(instanciaGlobal.get());
+            }
         }
 
         // 3. Preparação dos dados (Com proteção de tamanho de String)
@@ -195,6 +214,43 @@ public class EvolutionApiService {
         }
     }
 
+    /**
+     * Confirma na própria Evolution API se uma instância com esse nome ainda existe lá —
+     * usado antes de bloquear a criação de uma nova instância por causa de um vínculo local
+     * que pode estar órfão (a Evolution API perdeu o estado, por exemplo após um restart).
+     * Em caso de erro de comunicação, assume que NÃO existe: é melhor deixar a usuária tentar
+     * criar de novo do que travá-la pra sempre num vínculo que talvez nem exista mais.
+     */
+    private boolean instanciaAindaExisteNaEvolution(String instanceName) {
+        try {
+            String baseUrl = evolutionUrl.endsWith("/") ? evolutionUrl.substring(0, evolutionUrl.length() - 1) : evolutionUrl;
+            ResponseEntity<String> response = restTemplate.exchange(
+                    baseUrl + "/instance/fetchInstances", HttpMethod.GET, new HttpEntity<>(getHeaders()), String.class
+            );
+
+            String body = response.getBody();
+            if (body == null || body.isBlank()) return false;
+
+            JsonNode allInstancesNode = objectMapper.readTree(body);
+            if (!allInstancesNode.isArray()) return false;
+
+            for (JsonNode node : allInstancesNode) {
+                JsonNode nameNode = node.path("instance").path("instanceName");
+                if (nameNode.isMissingNode()) {
+                    nameNode = node.path("instanceName");
+                }
+                if (!nameNode.isMissingNode() && instanceName.equals(nameNode.asText())) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (Exception e) {
+            log.warn("Não foi possível confirmar na Evolution API se a instância {} ainda existe ({}). Assumindo que não existe.",
+                    instanceName, e.getMessage());
+            return false;
+        }
+    }
+
     public ResponseEntity<String> connectInstanceByUser(String usuarioId) {
         Optional<WhatsappInstance> instanceOpt = whatsappInstanceRepository.findByUsuarioId(usuarioId);
 
@@ -227,19 +283,22 @@ public class EvolutionApiService {
         String instanceName = instance.getInstanceName();
         String url = evolutionUrl + "/instance/delete/" + instanceName;
 
+        // O vínculo local (usuarioId -> instanceName) é só um registro interno nosso —
+        // não é a fonte da verdade sobre o estado real do WhatsApp. Clicou em apagar, ele
+        // some do nosso banco sempre, não importa o que a Evolution API responder (sucesso,
+        // 404 porque já não existe mais lá, erro de configuração, ou até fora do ar).
+        // Deixar essa decisão condicionada à resposta da Evolution API foi exatamente o que
+        // travava pra sempre a criação de uma instância nova ("Já existe uma instância global
+        // ativa no sistema"), porque o vínculo local nunca era liberado.
+        whatsappInstanceRepository.delete(instance);
+
         try {
-            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.DELETE, new HttpEntity<>(getHeaders()), String.class);
-
-            if (response.getStatusCode().is2xxSuccessful()) {
-                whatsappInstanceRepository.delete(instance);
-                log.info("Instância {} deletada com sucesso no banco e na API", instanceName);
-            }
-
-            return response;
+            ResponseEntity<String> respostaEvolution = restTemplate.exchange(url, HttpMethod.DELETE, new HttpEntity<>(getHeaders()), String.class);
+            log.info("Instância {} removida do vínculo local (status Evolution API: {})", instanceName, respostaEvolution.getStatusCode());
+            return ResponseEntity.ok("{\"message\": \"Instância removida com sucesso.\"}");
         } catch (Exception e) {
-            log.error("Erro ao deletar instância {}: {}", instanceName, e.getMessage());
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body("{\"message\": \"Erro ao deletar instância.\"}");
+            log.warn("Vínculo local da instância {} removido, mas não foi possível confirmar a exclusão na Evolution API ({}). Verifique manualmente se necessário.", instanceName, e.getMessage());
+            return ResponseEntity.ok("{\"message\": \"Vínculo local removido. Não foi possível confirmar a exclusão na Evolution API — verifique manualmente se necessário.\"}");
         }
     }
 

@@ -50,6 +50,15 @@ public class SecurityConfigurations {
                         // A SOLUÇÃO ESTÁ AQUI: Libera o POST (Cadastro) de Leads para os visitantes
                         .requestMatchers(HttpMethod.GET, "/api/leads/**").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/leads/**").permitAll()
+
+                        // Checkout do e-commerce: precisa ser público porque um visitante
+                        // anônimo (sem token) também finaliza pedido — a validação de preço/
+                        // estoque acontece toda no servidor, nunca confiando no que o cliente manda.
+                        .requestMatchers(HttpMethod.POST, "/api/pedidos/checkout").permitAll()
+
+                        // Webhook do Mercado Pago: chamado direto por eles, sem token nosso.
+                        .requestMatchers(HttpMethod.POST, "/api/pagamentos/mercadopago/webhook").permitAll()
+
                         // Opcional: Se você usa "OPTIONS" por conta do CORS do navegador, libere também:
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
 
@@ -64,6 +73,10 @@ public class SecurityConfigurations {
                         .requestMatchers(HttpMethod.PUT, "/api/categorias/**").hasAnyRole("OPERADOR", "ADMIN")
                         .requestMatchers(HttpMethod.DELETE, "/api/categorias/**").hasRole("ADMIN")
 
+                        // Rotas de Gestão de Subcategorias (renomear/excluir — criar já cai em /api/categorias/**)
+                        .requestMatchers(HttpMethod.PUT, "/api/subcategorias/**").hasAnyRole("OPERADOR", "ADMIN")
+                        .requestMatchers(HttpMethod.DELETE, "/api/subcategorias/**").hasRole("ADMIN")
+
                         // Rotas de Gestão de Banners (Protegidas)
                         .requestMatchers(HttpMethod.POST, "/api/banners/**").hasAnyRole("OPERADOR", "ADMIN")
                         .requestMatchers(HttpMethod.PUT, "/api/banners/**").hasAnyRole("OPERADOR", "ADMIN")
@@ -72,6 +85,7 @@ public class SecurityConfigurations {
 
                         // Rotas de Gestão de Revendedores (Protegidas)
                         .requestMatchers(HttpMethod.POST, "/api/revendedores").hasRole("ADMIN")
+                        .requestMatchers(HttpMethod.POST, "/api/revendedores/cadastrar").hasRole("ADMIN")
                         .requestMatchers(HttpMethod.DELETE, "/api/revendedores/**").hasRole("ADMIN")
                         .requestMatchers(HttpMethod.GET, "/api/revendedores").hasAnyRole("OPERADOR", "ADMIN")
 

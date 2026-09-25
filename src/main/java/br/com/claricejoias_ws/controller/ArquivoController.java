@@ -47,14 +47,21 @@ public class ArquivoController {
 
     // Adicione este método no seu ArquivoController
     @GetMapping("/view/{objectName}")
-    public ResponseEntity<InputStreamResource> view(@PathVariable String objectName) throws Exception {
-        String contentType = minioService.getContentType(objectName);
-        InputStream stream = minioService.download(objectName);
+    public ResponseEntity<InputStreamResource> view(@PathVariable String objectName) {
+        try {
+            String contentType = minioService.getContentType(objectName);
+            InputStream stream = minioService.download(objectName);
 
-        // Retorna o arquivo diretamente para o navegador renderizar, com o content-type real armazenado
-        return ResponseEntity.ok()
-                .contentType(MediaType.parseMediaType(contentType))
-                .body(new InputStreamResource(stream));
+            // Retorna o arquivo diretamente para o navegador renderizar, com o content-type real armazenado
+            return ResponseEntity.ok()
+                    .contentType(MediaType.parseMediaType(contentType))
+                    .body(new InputStreamResource(stream));
+        } catch (Exception e) {
+            // objectName inválido/inexistente no MinIO (ex: referência antiga, nome digitado
+            // errado) não pode derrubar a requisição com 500 — devolve 404 de forma limpa,
+            // o front já trata isso caindo no placeholder (ver ImagemService.getUrl).
+            return ResponseEntity.notFound().build();
+        }
     }
 
     @DeleteMapping("/{objectName}")

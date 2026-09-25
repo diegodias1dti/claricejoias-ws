@@ -32,13 +32,26 @@ public class WhatsAppService {
     private final FilaCobrancaRepository filaCobrancaRepository;
     private final RabbitTemplate rabbitTemplate;
     private final ModelMapper modelMapper;
-    private final WhatsAppRepository whatsAppRepository;
+    private final WhatsappInstanceRepository whatsappInstanceRepository;
 
     @Value("${app.whatsapp.cooldown-horas:24}")
     private int cooldownHoras;
 
+    // Usado só como ÚLTIMO recurso, se não houver nenhuma instância "loja matriz" cadastrada
+    // no banco ainda (revendedor IS NULL). Na prática, resolverInstanciaGlobal() below busca a
+    // instância real que foi conectada pelo painel — não esse valor fixo do properties, que
+    // facilmente fica apontando para uma instância antiga/inexistente na Evolution API.
     @Value("${evolution.api.instance}")
     private String instanciaGlobal;
+
+    // Fonte única de verdade para "qual instância usar quando não há revendedor": busca no
+    // banco a WhatsappInstance sem revendedor vinculado (a "loja matriz" criada via painel
+    // admin em /config/whatsapp). Só cai no valor fixo do properties se isso ainda não existir.
+    public String resolverInstanciaGlobal() {
+        return whatsappInstanceRepository.findByRevendedorIsNull()
+                .map(WhatsappInstance::getInstanceName)
+                .orElse(instanciaGlobal);
+    }
 
     // =========================================================================
     // 1. MÉTODOS DE ENFILEIRAMENTO (SALVAM NO BANCO COM STATUS PENDENTE)
@@ -88,9 +101,9 @@ public class WhatsAppService {
 
     private String instanciaParaRevendedor(Revendedor revendedor) {
         if (revendedor == null) {
-            return instanciaGlobal;
+            return resolverInstanciaGlobal();
         }
-        return revendedor.getWhatsappInstance() != null ? revendedor.getWhatsappInstance().getInstanceName() : instanciaGlobal;
+        return revendedor.getWhatsappInstance() != null ? revendedor.getWhatsappInstance().getInstanceName() : resolverInstanciaGlobal();
     }
 
     public void enviarCobrancaCliente(Cliente cliente, String texto, String operador, String instanciaRevendedor) {
@@ -115,7 +128,7 @@ public class WhatsAppService {
         fila.setOperador(operador);
         fila.setStatus(StatusDisparo.PENDENTE);
         fila.setDataCriacao(LocalDateTime.now());
-        fila.setInstanciaWhatsapp(instanciaRevendedor != null ? instanciaRevendedor : instanciaGlobal);
+        fila.setInstanciaWhatsapp(instanciaRevendedor != null ? instanciaRevendedor : resolverInstanciaGlobal());
 
         filaCobrancaRepository.save(fila);
         log.info("COBRANÇA enfileirada para o cliente: {}", cliente.getNome());
@@ -173,7 +186,7 @@ public class WhatsAppService {
             }
 
             String tipoMensagem = (disparo.getUrlImagem() != null && !disparo.getUrlImagem().isEmpty()) ? "IMAGEM" : "TEXTO";
-            String instancia = disparo.getInstanciaWhatsapp() != null ? disparo.getInstanciaWhatsapp() : instanciaGlobal;
+            String instancia = disparo.getInstanciaWhatsapp() != null ? disparo.getInstanciaWhatsapp() : resolverInstanciaGlobal();
             String numero = disparo.getLead() != null ? disparo.getLead().getWhatsapp() : disparo.getNumeroDestino();
 
             DisparoMensagemDTO dto = new DisparoMensagemDTO(
@@ -191,22 +204,34 @@ public class WhatsAppService {
     }
 
     @Scheduled(fixedDelay = 10000)
+    @Transactional
     public void despacharCobrancasParaRabbitMQ() {
-        // NÃO IMPLEMENTADO DE PROPÓSITO: hoje não existe fila/exchange nem consumidor dedicado
-        // para FilaCobranca no RabbitMQConfig/WhatsAppWorker. Publicar essas mensagens na mesma
-        // fila dos disparos (FILA_DISPAROS) faria o WhatsAppWorker tentar atualizar o status
-        // usando FilaDisparoRepository.findById(id) — um id de FilaCobranca não existe (ou pior,
-        // colide com o de outro registro) nessa tabela, corrompendo o status de disparos.
-        // As cobranças enfileiradas em enviarCobrancaCliente ficam paradas em FilaCobranca até
-        // que uma fila/consumidor próprios sejam criados para elas.
-        if (filaCobrancaRepository.findFirstByStatusOrderByDataCriacaoAsc(StatusDisparo.PENDENTE).isPresent()) {
-            log.warn("Há cobranças PENDENTES em FilaCobranca aguardando um consumidor dedicado no RabbitMQ (ainda não implementado).");
+        // Usa a MESMA fila/exchange dos disparos: o DisparoMensagemDTO já trazia o campo
+        // "tipoFila" (DISPARO/COBRANCA) exatamente para o WhatsAppWorker saber em qual tabela
+        // (FilaDisparoRepository ou FilaCobrancaRepository) atualizar o status ao processar.
+        List<FilaCobranca> pendentes = filaCobrancaRepository.findByStatusOrderByDataCriacaoAsc(StatusDisparo.PENDENTE);
+
+        for (FilaCobranca cobranca : pendentes) {
+            String instancia = cobranca.getInstanciaWhatsapp() != null ? cobranca.getInstanciaWhatsapp() : resolverInstanciaGlobal();
+            String numero = cobranca.getCliente() != null ? cobranca.getCliente().getWhatsapp() : null;
+
+            if (numero == null) {
+                cobranca.setStatus(StatusDisparo.ERRO);
+                cobranca.setMensagemErro("Cliente sem WhatsApp cadastrado.");
+                filaCobrancaRepository.save(cobranca);
+                continue;
+            }
+
+            DisparoMensagemDTO dto = new DisparoMensagemDTO(
+                    cobranca.getId(), "COBRANCA", "TEXTO", numero,
+                    cobranca.getTexto(), null, instancia
+            );
+
+            rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE_DISPAROS, RabbitMQConfig.ROUTING_KEY_DISPAROS, dto);
+
+            cobranca.setStatus(StatusDisparo.EM_PROCESSAMENTO);
+            filaCobrancaRepository.save(cobranca);
         }
     }
 
-
-
-    public WhatsappInstance findByRevendedorIsNull() {
-        return whatsAppRepository.findByRevendedorIsNull();
-    }
 }

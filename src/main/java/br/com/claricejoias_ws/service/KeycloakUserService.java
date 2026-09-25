@@ -101,6 +101,32 @@ public class KeycloakUserService {
     }
 
 
+    /**
+     * Fluxo para Revendedoras: cria a conta no Keycloak (login por e-mail, senha
+     * provisória obrigando troca no 1º acesso) e atribui a role REVENDEDORA.
+     * Retorna o ID gerado, que vira o ID do registro local em Revendedor.
+     * Sem @Transactional aqui de propósito: não toca no banco local, só na API do Keycloak.
+     */
+    public String criarUsuarioRevendedora(String email, String senha, String nomeCompleto) {
+        UserRepresentation user = new UserRepresentation();
+
+        // Diferente do cliente (username = whatsapp): a revendedora loga com e-mail/senha.
+        user.setUsername(email);
+        user.setEmail(email);
+        user.setEnabled(true);
+        user.setEmailVerified(false);
+        user.setRequiredActions(Collections.singletonList("UPDATE_PASSWORD"));
+
+        String[] nomes = nomeCompleto.trim().split(" ", 2);
+        user.setFirstName(nomes[0]);
+        if (nomes.length > 1) {
+            user.setLastName(nomes[1]);
+        }
+
+        Response response = keycloak.realm(REALM_NAME).users().create(user);
+        return processarResposta(response, senha, "REVENDEDORA");
+    }
+
     public void vincularVisitanteAoNovoUsuario(String visitorId, String userId, Cliente cliente) {
         if (visitorId == null) return;
 

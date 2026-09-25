@@ -1,6 +1,7 @@
 package br.com.claricejoias_ws.model;
 
 import br.com.claricejoias_ws.exceptions.RegraNegocioException;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import lombok.Data;
@@ -16,7 +17,10 @@ import java.util.List;
 @Getter
 @Setter
 @Entity
-@SQLDelete(sql = "UPDATE produto SET ativo = false WHERE id = ?")
+// Com @Version na entidade, o Hibernate SEMPRE tenta vincular um 2º parâmetro (a versão)
+// no WHERE do @SQLDelete, mesmo sendo SQL customizado — por isso o "AND version = ?" é
+// obrigatório aqui, senão o driver do Postgres quebra com "índice de coluna fora do intervalo".
+@SQLDelete(sql = "UPDATE produto SET ativo = false WHERE id = ? AND version = ?")
 @SQLRestriction("ativo = true")
 public class Produto {
 
@@ -55,6 +59,11 @@ public class Produto {
     @Column(nullable = false)
     private boolean ativo = true; // Por padrão, o produto nasce ativo
 
+    // @JsonIgnore quebra o ciclo Produto -> Subcategoria -> itens -> Produto -> ... que
+    // também estoura "Document nesting depth exceeds the maximum allowed" se algum
+    // endpoint devolver um Produto cru com a subcategoria (e os itens dela) carregados.
+    // As telas que precisam do ID da subcategoria de um produto já usam ProdutoDTO/CategoriaDTO.
+    @JsonIgnore
     @ManyToOne
     @JoinColumn(name = "subcategoria_id")
     private Subcategoria subcategoria;

@@ -5,6 +5,7 @@ import br.com.claricejoias_ws.model.Produto;
 import br.com.claricejoias_ws.service.ProdutoService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -16,6 +17,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/produtos")
+@Slf4j
 @Tag(name = "Produtos", description = "Endpoints para gerenciamento do catálogo de joias")
 public class ProdutoController {
 
@@ -46,7 +48,7 @@ public class ProdutoController {
             produtoService.processarXmlNfe(file);
             return ResponseEntity.ok().build();
         } catch (Exception e) {
-            e.printStackTrace();
+            log.error("Erro ao importar XML de NFe", e);
             return ResponseEntity.internalServerError().build();
         }
     }
@@ -66,7 +68,7 @@ public class ProdutoController {
 
             return ResponseEntity.ok().build();
         } catch (Exception e) {
-            e.printStackTrace();
+            log.error("Erro ao vincular imagens em lote aos produtos", e);
             return ResponseEntity.internalServerError().build();
         }
     }
@@ -88,7 +90,7 @@ public class ProdutoController {
             Produto novoProduto = produtoService.salvar(produto, files);
             return ResponseEntity.status(HttpStatus.CREATED).body(novoProduto);
         } catch (Exception e) {
-            e.printStackTrace();
+            log.error("Erro ao cadastrar produto", e);
             return ResponseEntity.internalServerError().build();
         }
     }
@@ -103,7 +105,7 @@ public class ProdutoController {
             Produto produtoAtualizado = produtoService.atualizar(id, produto, files);
             return ResponseEntity.ok(produtoAtualizado);
         } catch (Exception e) {
-            e.printStackTrace();
+            log.error("Erro ao atualizar produto id={}", id, e);
             return ResponseEntity.notFound().build();
         }
     }
@@ -114,6 +116,7 @@ public class ProdutoController {
             produtoService.deletar(id);
             return ResponseEntity.noContent().build();
         } catch (Exception e) {
+            log.error("Erro ao deletar produto id={}", id, e);
             return ResponseEntity.notFound().build();
         }
     }

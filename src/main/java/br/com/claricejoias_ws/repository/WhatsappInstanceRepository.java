@@ -12,6 +12,8 @@ public interface WhatsappInstanceRepository extends JpaRepository<WhatsappInstan
 
     Optional<WhatsappInstance> findByInstanceName(String instanceName);
 
+    Optional<WhatsappInstance> findByRevendedorIsNull();
+
     boolean existsByRevendedorIsNull();
 
     boolean existsByUsuarioId(String usuarioId);

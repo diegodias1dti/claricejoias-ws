@@ -90,7 +90,7 @@ services:
       - db_data:/var/lib/postgresql/data
 
   evolution-api:
-    image: atendai/evolution-api:v1.8.2
+    image: evoapicloud/evolution-api:v1.8.2
     container_name: claricejoias-evolution
     ports:
       - "8081:8080"

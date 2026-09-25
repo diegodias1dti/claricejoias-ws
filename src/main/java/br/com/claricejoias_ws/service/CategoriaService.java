@@ -100,11 +100,14 @@ public class CategoriaService {
         Categoria categoriaExistente = repository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Categoria não encontrada com o ID: " + id));
 
+        // NUNCA sobrescrever "subcategorias" aqui: como o relacionamento tem
+        // orphanRemoval=true, um cliente que só manda {nome} (como o modal de edição do
+        // front-end faz) chega com a coleção vazia por padrão — e "vazia" faz o Hibernate
+        // apagar de verdade todas as subcategorias (e, em cascata, desativar os produtos
+        // delas). Esse endpoint só atualiza o nome; edição de subcategorias tem que ser
+        // um fluxo próprio e explícito, não um efeito colateral de renomear a categoria.
         categoriaExistente.setNome(novosDados.getNome());
-        categoriaExistente.setSubcategorias(novosDados.getSubcategorias());
         categoriaExistente.setLoginUsuario(autenticacaoService.getUsername());
-
-        // Se houver subcategorias e você quiser atualizar em lote, a lógica entraria aqui
 
         return repository.save(categoriaExistente);
     }
@@ -115,6 +118,39 @@ public class CategoriaService {
             throw new RuntimeException("Não é possível deletar: Categoria inexistente.");
         }
         repository.deleteById(id);
+    }
+
+    // ==========================================================
+    // GESTÃO DE SUBCATEGORIAS (ações próprias e explícitas — nunca mais um efeito
+    // colateral do PUT de categoria, que foi exatamente o bug anterior)
+    // ==========================================================
+
+    @Transactional
+    public Subcategoria criarSubcategoria(Long categoriaId, String nome) {
+        Categoria categoria = repository.findById(categoriaId)
+                .orElseThrow(() -> new RuntimeException("Categoria não encontrada com o ID: " + categoriaId));
+
+        Subcategoria nova = new Subcategoria();
+        nova.setNome(nome);
+        nova.setCategoria(categoria);
+        return subCategoriaRepository.save(nova);
+    }
+
+    @Transactional
+    public Subcategoria atualizarSubcategoria(Long id, String nome) {
+        Subcategoria existente = subCategoriaRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Subcategoria não encontrada com o ID: " + id));
+        existente.setNome(nome);
+        return subCategoriaRepository.save(existente);
+    }
+
+    @Transactional
+    public void deletarSubcategoria(Long id) {
+        if (!subCategoriaRepository.existsById(id)) {
+            throw new RuntimeException("Não é possível deletar: Subcategoria inexistente.");
+        }
+        // Soft-delete (via @SQLDelete) — cascateia pros produtos dela, também soft-delete.
+        subCategoriaRepository.deleteById(id);
     }
 
     // Adicione no seu CategoriaService.java

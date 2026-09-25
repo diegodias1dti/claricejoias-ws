@@ -5,6 +5,7 @@ import br.com.claricejoias_ws.model.Lead;
 import br.com.claricejoias_ws.model.Revendedor;
 import br.com.claricejoias_ws.service.*;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.modelmapper.ModelMapper;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/mensagens")
 @RequiredArgsConstructor
+@Slf4j
 public class MensagemController {
 
     private final WhatsAppService whatsAppService;
@@ -63,7 +65,7 @@ public class MensagemController {
                         whatsAppService.enviarMensagemImagem(modelMapper.map(lead, Lead.class), legendaDaFoto, path, operador, revendedor);
 
                     } catch (Exception e) {
-                        System.out.println("Erro ao agendar imagem: " + e.getMessage());
+                        log.error("Erro ao agendar imagem para o lead {}", lead.getId(), e);
                     }
                 } else {
                     String textoSemFoto = "💍 *" + produto.getNome() + "* (Imagem indisponível)";

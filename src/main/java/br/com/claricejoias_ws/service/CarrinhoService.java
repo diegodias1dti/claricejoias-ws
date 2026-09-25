@@ -49,12 +49,24 @@ public class CarrinhoService {
             backoff = @Backoff(delay = 150)
     )
     public Pedido obterOuCriarCarrinho(String visitorId, String usuarioId, String revendedorId) {
-        if (isUsuarioLogado(usuarioId)) {
-            // Passamos o revendedorId para o carrinho de usuário
-            return processarCarrinhoDeUsuario(visitorId, usuarioId, revendedorId);
+        Pedido carrinho = isUsuarioLogado(usuarioId)
+                // Passamos o revendedorId para o carrinho de usuário
+                ? processarCarrinhoDeUsuario(visitorId, usuarioId, revendedorId)
+                // Passamos o revendedorId para o carrinho anônimo
+                : processarCarrinhoAnonimo(visitorId, revendedorId);
+
+        // Um item pode ter ficado "órfão" se o produto dele foi desativado depois (ex:
+        // categoria/subcategoria excluída) — como Produto tem @SQLRestriction("ativo = true"),
+        // item.getProduto() vem null nesse caso em vez de lançar erro. Removemos aqui pra não
+        // quebrar quem usa o carrinho depois (adicionarItem, removerItem, checkout etc).
+        limparItensComProdutoInativo(carrinho);
+        return carrinho;
+    }
+
+    private void limparItensComProdutoInativo(Pedido carrinho) {
+        if (carrinho.getItens() != null) {
+            carrinho.getItens().removeIf(item -> item.getProduto() == null);
         }
-        // Passamos o revendedorId para o carrinho anônimo
-        return processarCarrinhoAnonimo(visitorId, revendedorId);
     }
 
     @Transactional(readOnly = true)
@@ -158,12 +170,18 @@ public class CarrinhoService {
         dto.setCupomDesconto(pedido.getCupomDesconto());
         dto.setValorDesconto(pedido.getValorDesconto());
 
-        List<ItemCarrinhoDTO> itensDTO = pedido.getItens().stream().map(item -> {
-            ItemCarrinhoDTO itemDto = new ItemCarrinhoDTO();
-            itemDto.setProduto(modelMapper.map(item.getProduto(), ProdutoDTO.class));
-            itemDto.setQuantidade(item.getQuantidade());
-            return itemDto;
-        }).toList();
+        List<ItemCarrinhoDTO> itensDTO = pedido.getItens().stream()
+                // item.getProduto() vem null se o produto foi desativado depois de entrar no
+                // carrinho (ver limparItensComProdutoInativo) — ignoramos esses itens aqui
+                // porque esse método é chamado também em transações somente-leitura, onde não
+                // dá pra limpar o carrinho de verdade no banco.
+                .filter(item -> item.getProduto() != null)
+                .map(item -> {
+                    ItemCarrinhoDTO itemDto = new ItemCarrinhoDTO();
+                    itemDto.setProduto(modelMapper.map(item.getProduto(), ProdutoDTO.class));
+                    itemDto.setQuantidade(item.getQuantidade());
+                    return itemDto;
+                }).toList();
 
         dto.setItens(itensDTO);
 
@@ -297,8 +315,10 @@ public class CarrinhoService {
 
     private void transferirItens(Pedido origem, Pedido destino) {
         for (ItemPedido itemOrigem : origem.getItens()) {
+            if (itemOrigem.getProduto() == null) continue; // produto desativado depois — ignora
+
             destino.getItens().stream()
-                    .filter(i -> i.getProduto().getId().equals(itemOrigem.getProduto().getId()))
+                    .filter(i -> i.getProduto() != null && i.getProduto().getId().equals(itemOrigem.getProduto().getId()))
                     .findFirst()
                     .ifPresentOrElse(
                             itemDestino -> itemDestino.setQuantidade(itemDestino.getQuantidade() + itemOrigem.getQuantidade()),

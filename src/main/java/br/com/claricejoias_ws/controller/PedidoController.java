@@ -9,6 +9,7 @@ import br.com.claricejoias_ws.service.PedidoService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
@@ -28,6 +29,7 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/pedidos")
 @RequiredArgsConstructor
+@Slf4j
 @Tag(name = "Pedidos", description = "Endpoints unificados para gerenciamento de Vendas (PDV) e E-commerce")
 public class PedidoController {
 
@@ -49,11 +51,12 @@ public class PedidoController {
             Pedido pedidoSalvo = pedidoService.registrarPedidoPDV(dto, userId, isAdmin, autenticacaoService.getUsername());
             return ResponseEntity.status(HttpStatus.CREATED).body(pedidoSalvo);
         } catch (Exception e) {
+            log.error("Erro ao registrar pedido PDV", e);
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(e.getMessage());
         }
     }
 
-    @Operation(summary = "Finalizar pedido online (Checkout)", description = "Transforma um carrinho ativo do e-commerce em um pedido finalizado.")
+    @Operation(summary = "Finalizar pedido online (Checkout)", description = "Transforma um carrinho ativo do e-commerce em um pedido finalizado. Devolve { tipo: 'RETIRADA', pedido } ou { tipo: 'ONLINE', redirectUrl } conforme o tipoFinalizacao escolhido.")
     @PostMapping("/checkout")
     public ResponseEntity<?> finalizarPedido(
             @RequestHeader(value = "X-Visitor-ID", required = false) String visitorId,
@@ -62,11 +65,40 @@ public class PedidoController {
 
         try {
             String usuarioId = (jwt != null) ? jwt.getSubject() : null;
-            Pedido pedidoFinalizado = pedidoService.realizarCheckoutOnline(visitorId, usuarioId, checkoutDTO);
-            return ResponseEntity.ok(pedidoFinalizado);
+            Map<String, Object> resultado = pedidoService.realizarCheckoutOnline(visitorId, usuarioId, checkoutDTO);
+            return ResponseEntity.ok(resultado);
 
         } catch (RuntimeException e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
+            log.error("Erro ao finalizar checkout online", e);
+            return ResponseEntity.badRequest().body(Map.of("erro", e.getMessage()));
+        }
+    }
+
+    @Operation(summary = "Confirmar retirada", description = "A revendedora (ou admin) confirma que o cliente apareceu, pagou e retirou o pedido combinado.")
+    @PutMapping("/{id}/confirmar-retirada")
+    public ResponseEntity<?> confirmarRetirada(@PathVariable Long id, @AuthenticationPrincipal Jwt jwt) {
+        try {
+            String usuarioId = jwt.getSubject();
+            boolean isAdmin = verificarSeAdmin(jwt);
+            Pedido pedido = pedidoService.confirmarRetirada(id, usuarioId, isAdmin);
+            return ResponseEntity.ok(pedido);
+        } catch (RuntimeException e) {
+            log.error("Erro ao confirmar retirada do pedido {}", id, e);
+            return ResponseEntity.badRequest().body(Map.of("erro", e.getMessage()));
+        }
+    }
+
+    @Operation(summary = "Cancelar pedido pendente", description = "Cancela um pedido aguardando retirada ou pagamento (ex: cliente não apareceu) e devolve o estoque reservado.")
+    @PutMapping("/{id}/cancelar")
+    public ResponseEntity<?> cancelarPedido(@PathVariable Long id, @AuthenticationPrincipal Jwt jwt) {
+        try {
+            String usuarioId = jwt.getSubject();
+            boolean isAdmin = verificarSeAdmin(jwt);
+            Pedido pedido = pedidoService.cancelarPedidoPendente(id, usuarioId, isAdmin);
+            return ResponseEntity.ok(pedido);
+        } catch (RuntimeException e) {
+            log.error("Erro ao cancelar pedido {}", id, e);
+            return ResponseEntity.badRequest().body(Map.of("erro", e.getMessage()));
         }
     }
 

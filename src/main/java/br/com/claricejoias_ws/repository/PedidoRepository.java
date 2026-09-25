@@ -22,7 +22,11 @@ public interface PedidoRepository extends JpaRepository<Pedido, Long> {
     // Busca os pedidos do visitante anônimo (Mais recentes primeiro)
     List<Pedido> findByVisitorIdOrderByIdDesc(String visitorId);
 
-    @Query("SELECT p FROM Pedido p WHERE (p.visitorId = :visitorId OR p.cliente.usuarioId = :usuarioId) AND p.status = 'CARRINHO'")
+    // ATENÇÃO: compara p.usuarioId (campo do próprio Pedido, setado pelo CarrinhoService ao
+    // criar/mexer no carrinho) — NUNCA p.cliente.usuarioId. O carrinho não tem "cliente"
+    // vinculado até o checkout terminar, e navegar por p.cliente em JPQL gera um INNER JOIN
+    // implícito que descarta toda linha com cliente_id nulo, ou seja, todo carrinho existente.
+    @Query("SELECT p FROM Pedido p WHERE (p.visitorId = :visitorId OR p.usuarioId = :usuarioId) AND p.status = 'CARRINHO'")
     Optional<Pedido> buscarCarrinhoAtivo(@Param("visitorId") String visitorId, @Param("usuarioId") String usuarioId);
 
     @Query("SELECT p FROM Pedido p WHERE " +

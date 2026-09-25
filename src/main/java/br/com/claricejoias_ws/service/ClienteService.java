@@ -36,7 +36,6 @@ public class ClienteService {
     private final PedidoRepository pedidoRepository; // Alterado de VendaRepository
     private final ParcelaRepository parcelaRepository;
     private final LeadRepository leadRepository;
-    private final RevendedorService revendedorService;
 
     @Value("${evolution.api.instance}")
     private String instanciaGlobal;
@@ -160,12 +159,29 @@ public class ClienteService {
 
         validarPosseDoCliente(cliente, usuarioId, isAdmin);
 
-            Revendedor revendedor = revendedorService.findById(usuarioId)
-                    .orElseThrow(() -> new RegraNegocioException(""));
-        // Alterado de getVendas() para getPedidos()
+        // A cobrança deve sair pelo WhatsApp da revendedora DONA DO CLIENTE, não de quem
+        // clicou em "Cobrar" no painel — por isso usamos cliente.getRevendedor(), e não
+        // revendedorService.findById(usuarioId). Um admin (que normalmente não tem um
+        // Revendedor vinculado ao próprio usuarioId) sempre caía num erro vazio aqui antes.
+        // Cliente sem revendedor (loja matriz) ou revendedora sem instância conectada caem
+        // no fallback global dentro de enviarCobrancaCliente.
+        Revendedor revendedorDoCliente = cliente.getRevendedor();
+        String instanciaWhatsapp = (revendedorDoCliente != null && revendedorDoCliente.getWhatsappInstance() != null)
+                ? revendedorDoCliente.getWhatsappInstance().getInstanceName()
+                : null;
+        // Conta como "vencida" tanto quem já está com status ATRASADA (job noturno já rodou)
+        // quanto quem ainda está PENDENTE mas já passou (ou é hoje) a data de vencimento — o
+        // ParcelaService só atualiza o status uma vez por dia, então uma parcela que vence
+        // hoje pode ainda estar PENDENTE no banco na hora em que a revendedora tenta cobrar.
+        // Isso mantém a regra igual à usada no painel de Gestão de Clientes (habilita o botão
+        // "Cobrar" a partir do próprio dia do vencimento).
+        LocalDate hoje = LocalDate.now();
         BigDecimal totalDevido = cliente.getPedidos().stream()
                 .flatMap(pedido -> pedido.getParcelasDetalhadas().stream())
-                .filter(parcela -> StatusParcela.ATRASADA.equals(parcela.getStatus()))
+                .filter(parcela -> StatusParcela.ATRASADA.equals(parcela.getStatus())
+                        || (StatusParcela.PENDENTE.equals(parcela.getStatus())
+                                && parcela.getDataVencimento() != null
+                                && !parcela.getDataVencimento().isAfter(hoje)))
                 .map(parcela -> parcela.getValor() != null ? parcela.getValor() : BigDecimal.ZERO)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
@@ -180,14 +196,12 @@ public class ClienteService {
                 "Consta em nosso sistema um saldo pendente no valor de *R$ " + valorFormatado + "*.\n\n" +
                 "Gostaria de verificar uma previsão de pagamento para podermos dar baixa no sistema? Qualquer dúvida, estamos à disposição!";
 
-        whatsAppService.enviarCobrancaCliente(cliente, mensagem, autenticacaoService.getUsername(), revendedor.getWhatsappInstance().getInstanceName());
-
-        HistoricoCobranca historico = new HistoricoCobranca();
-        historico.setCliente(cliente);
-        historico.setFuncionario(funcionario);
-        historico.setDataHora(LocalDateTime.now());
-
-        historicoCobrancaRepository.save(historico);
+        // Só enfileira aqui — NÃO grava HistoricoCobranca ainda. O histórico (que trava o
+        // reenvio por cooldownHoras) só é criado pelo WhatsAppWorker quando a Evolution API
+        // confirmar que a mensagem foi ENVIADA de verdade. Se a instância estiver errada/offline
+        // e o envio falhar, o cliente não pode ficar "protegido" por 24h de um envio que nunca
+        // aconteceu.
+        whatsAppService.enviarCobrancaCliente(cliente, mensagem, funcionario, instanciaWhatsapp);
     }
 
     public List<MovimentacaoDTO> buscarHistoricoCompras(Long clienteId, String usuarioId, boolean isAdmin) {

@@ -84,6 +84,15 @@ public class Pedido {
     @Column(name = "total_lucro", precision = 10, scale = 2)
     private BigDecimal totalLucro = BigDecimal.ZERO;
 
+    // Correlaciona esse pedido com o pagamento no Mercado Pago (Checkout Pro).
+    // preferenceId é gerado na hora de criar o link de pagamento; paymentId só chega
+    // depois, via webhook, quando o cliente efetivamente paga.
+    @Column(name = "mercado_pago_preference_id")
+    private String mercadoPagoPreferenceId;
+
+    @Column(name = "mercado_pago_payment_id")
+    private String mercadoPagoPaymentId;
+
     public void addItem(ItemPedido item) {
         itens.add(item);
         item.setPedido(this);
